@@ -26,6 +26,48 @@ const creditsUsed = (voterId) => {
   return Object.values(voter.allocations).reduce((sum, votes) => sum + voteCost(votes), 0);
 };
 
+
+// ============================================================================
+// WHITELIST MIDDLEWARE
+// ============================================================================
+
+let _whitelistCache = null;
+let _whitelistCacheTime = 0;
+const WHITELIST_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+async function fetchWhitelist() {
+  const now = Date.now();
+  if (_whitelistCache && (now - _whitelistCacheTime) < WHITELIST_CACHE_TTL) {
+    return _whitelistCache;
+  }
+  try {
+    const res = await fetch('https://www.owockibot.xyz/api/whitelist');
+    const data = await res.json();
+    _whitelistCache = new Set(data.map(e => (e.address || e).toLowerCase()));
+    _whitelistCacheTime = now;
+    return _whitelistCache;
+  } catch (err) {
+    console.error('Whitelist fetch failed:', err.message);
+    if (_whitelistCache) return _whitelistCache;
+    return new Set();
+  }
+}
+
+function requireWhitelist(addressField = 'address') {
+  return async (req, res, next) => {
+    const addr = req.body?.[addressField] || req.body?.creator || req.body?.participant || req.body?.sender || req.body?.from || req.body?.address;
+    if (!addr) {
+      return res.status(400).json({ error: 'Address required' });
+    }
+    const whitelist = await fetchWhitelist();
+    if (!whitelist.has(addr.toLowerCase())) {
+      return res.status(403).json({ error: 'Invite-only. Tag @owockibot on X to request access.' });
+    }
+    next();
+  };
+}
+
+
 app.get('/', (req, res) => {
   res.json({
     name: 'Streaming Quadratic Voting',
@@ -80,7 +122,7 @@ app.get('/agent', (req, res) => {
 });
 
 // Register voter
-app.post('/voters', (req, res) => {
+app.post('/voters', requireWhitelist(), (req, res) => {
   const { voterId, initialCredits } = req.body;
   const id = voterId || uuidv4();
   
@@ -108,7 +150,7 @@ app.get('/voters/:id', (req, res) => {
 });
 
 // Add credits
-app.post('/voters/:id/credits', (req, res) => {
+app.post('/voters/:id/credits', requireWhitelist(), (req, res) => {
   const voter = voters.get(req.params.id);
   if (!voter) return res.status(404).json({ error: 'Voter not found' });
   
@@ -120,7 +162,7 @@ app.post('/voters/:id/credits', (req, res) => {
 });
 
 // Create proposal
-app.post('/proposals', (req, res) => {
+app.post('/proposals', requireWhitelist(), (req, res) => {
   const { title, description, fundingPool } = req.body;
   if (!title) return res.status(400).json({ error: 'Title required' });
   
@@ -179,7 +221,7 @@ app.get('/proposals/:id', (req, res) => {
 });
 
 // Allocate votes (can be adjusted anytime)
-app.post('/proposals/:id/allocate', (req, res) => {
+app.post('/proposals/:id/allocate', requireWhitelist(), (req, res) => {
   const proposal = proposals.get(req.params.id);
   if (!proposal) return res.status(404).json({ error: 'Proposal not found' });
   if (proposal.status !== 'active') return res.status(400).json({ error: 'Proposal not active' });
@@ -221,7 +263,7 @@ app.post('/proposals/:id/allocate', (req, res) => {
 });
 
 // Distribute based on QV results
-app.post('/proposals/:id/distribute', async (req, res) => {
+app.post('/proposals/:id/distribute', requireWhitelist(), async (req, res) => {
   const proposal = proposals.get(req.params.id);
   if (!proposal) return res.status(404).json({ error: 'Proposal not found' });
   
